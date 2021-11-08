@@ -1,7 +1,26 @@
+{-|
+  Author: Wyatt D. Whiting
+    Date: 20211107
+    Desc: A naive implementation of BrainFuck in Haskell. This implementation is merely an interpreter, and performs no optimizations on the input program.
+
+    TODO
+    Mode to run the program where it draws inputs from a given string rather than from direct user input
+    Script verifier -> check for balanced brackets before execution
+    Refactor code to work with `MaybeT` monad transformer directly rather than with the `andThen` hack
+    Version for compilation with GHC rather than staying with GHCi mode.
+    Deal with return characters in program string
+-}
+
+
 import Control.Monad.Trans.Maybe
 import Data.Char
 
+
+-- The State of a BrainFuck machine is best represented as a left list, a current cell, and a right list
 data BrainFuckState = BFS [Int] Int [Int] deriving Show
+
+
+-- A BrainFuck program is made of commands. A NULL constructor encodes non-command characters which have no effect.
 data Cmd = LEFT  -- '<'
          | RIGHT -- '>'
          | INC   -- '+'
@@ -14,17 +33,27 @@ data Cmd = LEFT  -- '<'
          deriving Show
 
 
+-- Archtypical program for testing
 helloWorld = "++++++++[>++++[>++>+++>+++>+<<<<-]>+>+>->>+[<]<-]>>.>---.+++++++..+++.>>.<-.<.+++.------.--------.>>+.>++."
 
-type Script = [Cmd]
-validChars = "<>+-,.[]"
 
+-- a script is a possibly-empty list of commands of arbitrary length
+type Script = [Cmd]
+
+
+-- the starting state of a BrainFuck machine is an empty tape 
 start = BFS [] 0 []
 
--- thanks to ErikR on stackoverflow
+
+{-|
+    Then `andThen` function is an analog of `>>=` (monadic bind) for a `Maybe a` in the context of an IO monad
+    thanks to ErikR on stackoverflow
+-} 
 andThen :: IO (Maybe a) -> (a -> IO (Maybe b)) -> IO (Maybe b)
 andThen a b = runMaybeT $ MaybeT a >>= (\x -> MaybeT (b x))
 
+
+-- Convert character to a BrainFuck command
 charToCmd :: Char -> Cmd
 charToCmd c = case c of '>' -> RIGHT
                         '<' -> LEFT
@@ -36,35 +65,42 @@ charToCmd c = case c of '>' -> RIGHT
                         ']' -> LE
                         _   -> NULL
 
---parser for scripts 
+-- convert a program to a script, but point-free!
 transString :: [Char] -> Script
 transString = map charToCmd 
 
 
--- main function: fundamentally runs *ONCE*
--- it takes a script and runs it. That's it
+{-|
+    The `runProgram` functon takes a list of characters and returns an IO monad contaning possibly a BrainFuckState
+    The list of characters is first converted to a sequence of `Cmd`s, which is then applied to the initial BrainFuckState
+-}
 runProgram :: [Char] -> IO (Maybe BrainFuckState)
 runProgram s = applySeq (transString s) start
 
--- extract the value at the data pointer from a BrainFuckState
+-- The `getValAtPtr` function extracts the integer value of the cell currented pointed at in a BrainFuckState
 getValAtPtr :: BrainFuckState -> Int
 getValAtPtr (BFS _ r _) = r
 
 
--- apply a script to a state, including loops
+{-|
+    The `applySeq` function applies a Script to a BrainFuckState, returning an IO (Maybe BrainFuckState)
+-}
 applySeq :: Script -> BrainFuckState -> IO (Maybe BrainFuckState)
-applySeq []         s   = return $ Just s --case where the program terminates
-applySeq (LB:ls)    s   = if   getValAtPtr s == 0 --if value at data pointer is 0, skip the loop entirely
-                          then applySeq rest s
-                          else (andThen (applySeq (tail loopBlock) s) (applySeq (LB:ls)))
+applySeq []         s   = return $ Just s               -- There are no more commands to apply, so just skip the state
+applySeq (LB:ls)    s   = if   getValAtPtr s == 0       -- if value at data pointer is 0...
+                          then applySeq rest s          -- then skip the loop entirely 
+                                                        -- otherwise, apply to the code to be looped, then 
+                                                        -- with that state, test the jump condition again
+                          else (andThen (applySeq (tail loopBlock) s) (applySeq (LB:ls))) 
                               where loopBlock = getLoopSubScript (-1) (LB:ls)
                                     rest      = drop (length loopBlock) (LB:ls)
-applySeq (l:ls)     s   = andThen (applyCmd l s) (applySeq ls)
+applySeq (l:ls)     s   = andThen (applyCmd l s) (applySeq ls)  -- in all other cases, apply the current command followed by the rest
 
 
-
---given a script array starting with LB, return the script only between that
---LB and the matching LE
+{-|
+    The `getLoopSubScript` function takes a script which is known to contain a looping section, and return just that looping section
+    For example, the Script [NULL, LB, INC, INC, DEC, LE, NULL] becomes [LB, INC, INC, DEC, LE]
+-}
 getLoopSubScript :: Int -> Script -> Script
 getLoopSubScript _ []   = []
 getLoopSubScript 0 l    = case head l of --nonempty list
@@ -78,7 +114,11 @@ getLoopSubScript n l    = case head l of
 
 
 
-
+{-|
+    The `applyCmd` function takes a command and BrainFuckState, and returns and IO Maybe BrainFuckState
+    Essentially, if the command is valid, it gets wrapped in a Just constructor and returned in an IO.
+    If the command is invalid, we can wrap Nothing in an IO and notify the user as a side effect. 
+-}
 applyCmd :: Cmd -> BrainFuckState -> IO (Maybe BrainFuckState)
 applyCmd RIGHT (BFS l c [])     = return $
                                     Just $
@@ -105,12 +145,18 @@ applyCmd OUT   (BFS l c r)      = do
 applyCmd NULL  s                = return $ Just $ s
 applyCmd _     s                = applyCmd NULL s
 
--- take user input from terminal, return an IO Int with the ascii value for the first character of the user's input
+
+{-|
+    `userInput` is an IO Monad containing an integer. 
+    When evaluated, it returns an Int representing the first character of the user's input, interpreted as an ASCII character
+-} 
 userInput :: IO Int
 userInput = do 
             putStr "Input: "
             x <- getLine
             return $ ord . head $ x
 
+
+-- `bindInputToState` takes an IO Int and BrainFuckState, putting the Int into the state.
 bindInputToState :: IO Int -> BrainFuckState -> IO (Maybe BrainFuckState)
 bindInputToState n (BFS l _ r) = n >>= (\x -> return $ Just $ BFS l x r)
